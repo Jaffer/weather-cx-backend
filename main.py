@@ -1,11 +1,43 @@
+import asyncio
 import os
+from contextlib import asynccontextmanager
 import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 
 load_dotenv()
 
-app = FastAPI()
+# Background task to keep Render free tier awake by pinging its public URL
+async def keep_alive_loop():
+    # Wait 60 seconds after startup before starting periodic pings
+    await asyncio.sleep(60)
+    while True:
+        url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("KEEP_ALIVE_URL")
+        if url:
+            ping_url = f"{url.rstrip('/')}/health"
+            try:
+                res = await asyncio.to_thread(requests.get, ping_url, timeout=10)
+                print(f"[Keep-Alive] Pinged {ping_url} - status code: {res.status_code}")
+            except Exception as e:
+                print(f"[Keep-Alive] Ping failed: {e}")
+        else:
+            print("[Keep-Alive] No public URL found (set RENDER_EXTERNAL_URL or KEEP_ALIVE_URL).")
+        # Ping every 10 minutes (600s) to beat Render's 15-minute inactivity timeout
+        await asyncio.sleep(600)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start keep-alive loop on startup
+    task = asyncio.create_task(keep_alive_loop())
+    yield
+    # Clean up on shutdown
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+app = FastAPI(lifespan=lifespan)
 
 # API keys loaded from environment variables
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "")
@@ -14,6 +46,12 @@ OPENWEATHER_KEY = os.getenv("OPENWEATHER_KEY", "")
 @app.get("/")
 def read_root():
     return {"status": "ok", "message": "Weather CX Backend is running"}
+
+@app.get("/health")
+@app.get("/ping")
+def health_check():
+    return {"status": "alive", "message": "Service is active"}
+
 
 
 @app.post("/webhook")
